@@ -32,7 +32,6 @@ const (
 	HighBufferSize = 1024 * 1024 * 256
 )
 
-//nolint:deadcode,unused
 const (
 	// BatchReadSize 异步刷盘时每次从缓冲区读取1M的数据
 	BatchReadSize = 1024 * 1024
@@ -42,7 +41,6 @@ const (
 
 type BlockDataType uint16
 
-//nolint:deadcode,unused
 const (
 	// BlockTypeFull 标识当前块包括了是一条完整的数据
 	BlockTypeFull BlockDataType = iota + 1
@@ -123,13 +121,11 @@ func newBuffer(capacity int64, wal *os.File) *Buffer {
 	return b
 }
 
-//nolint:deadcode,unused
 // free 通道剩余的空间，字节数
 func (b *Buffer) free() int64 {
 	return b.capacity - b.nextW
 }
 
-//nolint:deadcode,unused
 // reset 重置缓冲区，用于在触发切换时，重置的缓冲区切换为新写入的缓冲区
 func (b *Buffer) reset() {
 	b.data = b.data[:0]

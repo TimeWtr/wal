@@ -61,7 +61,6 @@ type WAL struct {
 	walFile *os.File
 }
 
-//nolint:deadcode,unused
 func NewWAL(capacity int64, dir string) (*WAL, error) {
 	walFile, err := os.OpenFile(filepath.Join(dir, DefaultWalFile), os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
 	if err != nil {
@@ -120,4 +119,9 @@ func (w *WAL) switchStatus() {
 	w.activeBufferIdx.Store(1 - activeBufferIdx)
 	go w.buffers[activeBufferIdx].asyncRead()
 	w.s.Store(WritingStatus)
+}
+
+// Close 关闭WAL
+func (w *WAL) Close() {
+	w.t.Stop()
 }
