@@ -6,6 +6,10 @@ ut:
 tidy:
 	@go mod tidy
 
+.PHONY: clean
+clean:
+	@cd logs && rm wal.log
+
 .PHONY: check
 check:
 	@$(MAKE) --no-print-directory tidy
