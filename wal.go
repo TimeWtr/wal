@@ -61,6 +61,7 @@ type WAL struct {
 	walFile *os.File
 }
 
+//nolint:deadcode,unused
 func NewWAL(capacity int64, dir string) (*WAL, error) {
 	walFile, err := os.OpenFile(filepath.Join(dir, DefaultWalFile), os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
 	if err != nil {
