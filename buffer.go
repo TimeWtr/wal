@@ -20,11 +20,22 @@ import (
 	"hash/crc32"
 	"os"
 	"sync"
+	"sync/atomic"
 )
 
-//nolint:deadcode,unused
+var pool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 1024)
+	},
+}
+
 const (
-	// MixBufferSize 低级的Buffer容量(32M)
+	WritingBufferStatus = iota
+	ReadingBufferStatus
+)
+
+const (
+	// MixBufferSize 低级的Buffer容量(16M)
 	MixBufferSize = 1024 * 1024 * 16
 	// MiddleBufferSize 中级的Buffer容量(64MB)
 	MiddleBufferSize = 1024 * 1024 * 64
@@ -33,8 +44,9 @@ const (
 )
 
 const (
-	// BatchReadSize 异步刷盘时每次从缓冲区读取1M的数据
-	BatchReadSize = 1024 * 1024
+	// DefaultBatchReadSize 异步刷盘时每次从缓冲区读取2M的数据
+	DefaultBatchReadSize = 1024 * 1024 * 2
+
 	// 测试用的读取块大小
 	_testBatchReadSize = 10
 )
@@ -99,24 +111,32 @@ type Buffer struct {
 	// 填充64字节隔离r和isFull
 	_ [64]byte
 	// 是否已满
-	isFull bool
+	isFull atomic.Bool
+	// 当前缓冲区状态
+	status atomic.Uint32
 	// buffer的容量
 	capacity int64
 	// walFile文件句柄
 	wal *os.File
 	// 加锁保护
 	mu sync.Mutex
-	// 轮询时间间隔
-
+	// 单次读取块的大小，默认为1M
+	blockSize int64
+	// 关闭信号
+	closed chan struct{}
 }
 
-func newBuffer(capacity int64, wal *os.File) *Buffer {
+func newBuffer(capacity int64, wal *os.File, blockSize int64) *Buffer {
 	b := &Buffer{
-		data:     make([]byte, capacity),
-		capacity: capacity,
-		wal:      wal,
-		mu:       sync.Mutex{},
+		data:      make([]byte, capacity),
+		capacity:  capacity,
+		wal:       wal,
+		mu:        sync.Mutex{},
+		blockSize: blockSize,
+		closed:    make(chan struct{}),
 	}
+	b.isFull.Store(false)
+	b.status.Store(WritingBufferStatus)
 
 	return b
 }
@@ -126,24 +146,33 @@ func (b *Buffer) free() int64 {
 	return b.capacity - b.nextW
 }
 
+func (b *Buffer) full() bool {
+	return b.isFull.Load()
+}
+
 // reset 重置缓冲区，用于在触发切换时，重置的缓冲区切换为新写入的缓冲区
 func (b *Buffer) reset() {
-	b.data = b.data[:0]
+	for i := range b.data {
+		b.data[i] = 0
+	}
 	b.w, b.r, b.nextW = 0, 0, 0
-	b.isFull = false
+	b.isFull.Store(false)
 }
 
 // write 写入数据，还需要传入参数标识是否是完整的数据
 func (b *Buffer) write(data []byte, isFull bool) error {
-	b.mu.Lock()
-	if b.isFull {
-		b.mu.Unlock()
+	if b.status.Load() == ReadingBufferStatus {
 		return ErrBufferFull
 	}
 
+	if b.isFull.Load() {
+		return ErrBufferFull
+	}
+
+	b.mu.Lock()
 	requireSize := int64(HeaderSize + len(data))
-	if b.capacity-b.nextW < requireSize {
-		b.isFull = true
+	if b.free() < requireSize {
+		b.isFull.Store(true)
 		b.mu.Unlock()
 		return ErrBufferFull
 	}
@@ -155,7 +184,7 @@ func (b *Buffer) write(data []byte, isFull bool) error {
 	if isFull {
 		binary.BigEndian.PutUint16(b.data[startOffset+BlockDataTypeOffset:startOffset+LSNOffset], BlockTypeFull.uint16())
 	} else {
-		binary.BigEndian.PutUint16(b.data[startOffset+BlockDataTypeOffset:startOffset+startOffset+LSNOffset], BlockTypeHeader.uint16())
+		binary.BigEndian.PutUint16(b.data[startOffset+BlockDataTypeOffset:startOffset+LSNOffset], BlockTypeHeader.uint16())
 	}
 
 	binary.BigEndian.PutUint64(b.data[startOffset+LSNOffset:startOffset+DataLengthOffset], b.lsn())
@@ -165,8 +194,8 @@ func (b *Buffer) write(data []byte, isFull bool) error {
 	checkSum := crc32.Checksum(data, crcTable)
 	binary.BigEndian.PutUint32(b.data[startOffset+Crc32Offset:startOffset+ContentOffset], checkSum)
 
-	copy(b.data[startOffset+ContentOffset:], data)
-	b.w += HeaderSize
+	copy(b.data[startOffset+ContentOffset:startOffset+requireSize], data)
+	b.w += requireSize
 
 	return nil
 }
@@ -176,10 +205,21 @@ func (b *Buffer) lsn() uint64 {
 }
 
 // asyncRead 异步读取，因为是双通道会切换通道，所以当该通道转换为异步刷盘通道读取
-// 数据时，不会出现写入的情况，也就是没有并发安全问题。
+// 数据时，不会出现buffer写入的情况，使用原子状态判断来避免多个goroutine同时读和写文件
 func (b *Buffer) asyncRead() {
-	for b.r <= b.nextW {
-		endOffset := b.r + BatchReadSize
+	if b.status.Load() == ReadingBufferStatus {
+		return
+	}
+
+	b.switchReading()
+	for b.r <= b.nextW && b.nextW != 0 {
+		select {
+		case <-b.closed:
+			return
+		default:
+		}
+
+		endOffset := b.r + b.blockSize
 		if endOffset >= b.nextW {
 			endOffset = b.nextW
 		}
@@ -187,6 +227,7 @@ func (b *Buffer) asyncRead() {
 		if len(data) == 0 {
 			break
 		}
+
 		_, err := b.wal.Write(data)
 		if err != nil {
 			// 失败了之后继续读
@@ -194,8 +235,27 @@ func (b *Buffer) asyncRead() {
 			continue
 		}
 
+		if err = b.wal.Sync(); err != nil {
+			//todo 需要处理刷盘失败问题以及重试可能导致的数据写入重复问题
+			fmt.Println("同步失败：", err)
+			continue
+		}
+
 		b.r = endOffset
 	}
-	b.isFull = false
+
 	b.reset()
+	b.switchWriting()
+}
+
+func (b *Buffer) switchReading() {
+	b.status.Store(ReadingBufferStatus)
+}
+
+func (b *Buffer) switchWriting() {
+	b.status.Store(WritingBufferStatus)
+}
+
+func (b *Buffer) Close() {
+	close(b.closed)
 }

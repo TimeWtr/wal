@@ -18,7 +18,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -49,8 +48,6 @@ type WAL struct {
 	idx int64
 	// 活跃通道下标
 	activeBufferIdx atomic.Uint32
-	// 加锁保护
-	lock *sync.RWMutex
 	// 关闭通知通道
 	closeCh chan struct{}
 	// 定时ticker
@@ -61,15 +58,15 @@ type WAL struct {
 	walFile *os.File
 }
 
-func NewWAL(capacity int64, dir string) (*WAL, error) {
+func NewWAL(capacity int64, dir string, blockSize int64) (*WAL, error) {
 	walFile, err := os.OpenFile(filepath.Join(dir, DefaultWalFile), os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
 	if err != nil {
 		return nil, err
 	}
 
 	buffers := make([]*Buffer, BufferChannelCount)
-	buffers[0] = newBuffer(capacity, walFile)
-	buffers[1] = newBuffer(capacity, walFile)
+	buffers[0] = newBuffer(capacity, walFile, blockSize)
+	buffers[1] = newBuffer(capacity, walFile, blockSize)
 
 	w := &WAL{
 		buffers: []*Buffer{},
