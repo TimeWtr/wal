@@ -14,44 +14,52 @@
 
 package wal
 
-//func TestNewBuffer(t *testing.T) {
-//	walFile, err := os.OpenFile("./logs/wal.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-//	assert.Nil(t, err)
-//	buf := newBuffer(100000, walFile)
-//	defer buf.reset()
-//
-//	closeCh := make(chan struct{})
-//
-//	var wg sync.WaitGroup
-//	wg.Add(2)
-//	go func() {
-//		defer wg.Done()
-//		for {
-//			select {
-//			case <-closeCh:
-//				return
-//			default:
-//				if buf.isFull {
-//					buf.asyncRead()
-//				}
-//			}
-//		}
-//	}()
-//
-//	go func() {
-//		defer wg.Done()
-//
-//		for i := 0; i < 5000; i++ {
-//			msg := []byte(fmt.Sprintf("this is a test message, number: %d\n", i))
-//			err = buf.write(msg, true)
-//			if err != nil {
-//				assert.Equal(t, ErrBufferFull, err)
-//			}
-//		}
-//
-//		close(closeCh)
-//	}()
-//
-//	wg.Wait()
-//	t.Log("Done!")
-//}
+import (
+	"fmt"
+	"github.com/stretchr/testify/assert"
+	"os"
+	"sync"
+	"testing"
+)
+
+func TestNewBuffer(t *testing.T) {
+	walFile, err := os.OpenFile("./logs/wal.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	assert.Nil(t, err)
+	buf := newBuffer(100000, walFile)
+	defer buf.reset()
+
+	closeCh := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-closeCh:
+				return
+			default:
+				if buf.isFull {
+					buf.asyncRead()
+				}
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		for i := 0; i < 5000; i++ {
+			msg := []byte(fmt.Sprintf("this is a test message, number: %d\n", i))
+			err = buf.write(msg, true)
+			if err != nil {
+				assert.Equal(t, ErrBufferFull, err)
+			}
+		}
+
+		close(closeCh)
+	}()
+
+	wg.Wait()
+	t.Log("Done!")
+}

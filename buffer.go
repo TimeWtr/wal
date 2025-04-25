@@ -193,6 +193,9 @@ func (b *Buffer) asyncRead() {
 			fmt.Println("写入失败：", err)
 			continue
 		}
+		if err = b.wal.Sync(); err != nil {
+			//todo 需要处理刷盘失败问题以及重试可能导致的数据写入重复问题
+		}
 
 		b.r = endOffset
 	}
