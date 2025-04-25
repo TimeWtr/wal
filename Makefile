@@ -1,3 +1,7 @@
+.PHONY: vet
+vet:
+	@go vet ./...
+
 .PHONY: ut
 ut:
 	@go test ./...
@@ -8,9 +12,11 @@ tidy:
 
 .PHONY: clean
 clean:
-	@cd logs && rm wal.log
+	@rm -f wal.test
+	@cd logs && rm wal.log && rm -f mem.pprof
 
 .PHONY: check
 check:
 	@$(MAKE) --no-print-directory tidy
+	@$(MAKE) --no-print-directory vet
 	@$(MAKE) --no-print-directory ut
