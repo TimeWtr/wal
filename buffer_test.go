@@ -78,7 +78,7 @@ func TestNewBuffer(t *testing.T) {
 func BenchmarkBuffer_Read_Write(b *testing.B) {
 	walFile, err := os.OpenFile("./logs/wal.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
 	assert.Nil(b, err)
-	buf := newBuffer(1024, walFile, DefaultBatchReadSize)
+	buf := newBuffer(100, walFile, DefaultBatchReadSize)
 	defer buf.reset()
 
 	closeCh := make(chan struct{})

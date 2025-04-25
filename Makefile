@@ -1,3 +1,10 @@
+DIR := logs
+
+ifeq ($(wildcard $(DIR)),)
+$(shell mkdir -p $(DIR))
+endif
+
+
 .PHONY: vet
 vet:
 	@go vet ./...
@@ -10,13 +17,12 @@ ut:
 tidy:
 	@go mod tidy
 
-.PHONY: clean
-clean:
-	@rm -f wal.test
-	@cd logs && rm wal.log && rm -f mem.pprof && rm -f cpu.pprof
-
 .PHONY: check
 check:
 	@$(MAKE) --no-print-directory tidy
 	@$(MAKE) --no-print-directory vet
 	@$(MAKE) --no-print-directory ut
+
+clean:
+	@rm -f wal.test
+	@rm -rf logs
