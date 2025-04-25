@@ -13,7 +13,7 @@ tidy:
 .PHONY: clean
 clean:
 	@rm -f wal.test
-	@cd logs && rm wal.log && rm -f mem.pprof
+	@cd logs && rm wal.log && rm -f mem.pprof && rm -f cpu.pprof
 
 .PHONY: check
 check:

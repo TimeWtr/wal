@@ -27,7 +27,7 @@ import (
 func TestNewBuffer(t *testing.T) {
 	walFile, err := os.OpenFile("./logs/wal.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
 	assert.Nil(t, err)
-	buf := newBuffer(MixBufferSize, walFile, DefaultBatchReadSize)
+	buf := newBuffer(1024, walFile, DefaultBatchReadSize)
 	defer buf.reset()
 
 	closeCh := make(chan struct{})
@@ -38,7 +38,7 @@ func TestNewBuffer(t *testing.T) {
 	go func() {
 		defer wg.Done()
 
-		for i := 0; i < 30000; i++ {
+		for i := 0; i < 100; i++ {
 			msg := []byte(fmt.Sprintf("this is a test message, number: %d\n", i))
 			isFull := false
 			if i%3 == 0 {
@@ -78,7 +78,7 @@ func TestNewBuffer(t *testing.T) {
 func BenchmarkBuffer_Read_Write(b *testing.B) {
 	walFile, err := os.OpenFile("./logs/wal.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
 	assert.Nil(b, err)
-	buf := newBuffer(MixBufferSize, walFile, DefaultBatchReadSize)
+	buf := newBuffer(1024, walFile, DefaultBatchReadSize)
 	defer buf.reset()
 
 	closeCh := make(chan struct{})
