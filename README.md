@@ -2,9 +2,13 @@
 基于Go实现的高可用、高性能的WAL机制
 
 ## 1. WAL日志格式定义
-| 分片类型   | LSN    | Length | CRC校验  |
+| LSN    | 分片类型   | Length | CRC校验  |
 |--------|--------|--------|--------|
-| 1bytes | 4bytes | 8bytes | 4bytea |
+| 8bytes | 2bytes | 8bytes | 4bytea |
+
+
+LSN: 
+    每一条数据都有一个LSN，这个LSN是全局唯一且单调递增的，用于对数据进行排序，保证全局有序。
 
 分片类型：
     
