@@ -136,7 +136,7 @@ func (b *Buffer) reset() {
 }
 
 // write 写入数据，还需要传入参数标识是否是完整的数据
-func (b *Buffer) write(data []byte, isFull bool) error {
+func (b *Buffer) write(data []byte) error {
 	if b.status.Load() == ReadingBufferStatus {
 		return ErrBufferFull
 	}
@@ -146,15 +146,14 @@ func (b *Buffer) write(data []byte, isFull bool) error {
 	}
 
 	b.mu.Lock()
-	requireSize := int64(HeaderSize + len(data))
+	defer b.mu.Unlock()
+	requireSize := int64(len(data))
 	if b.free() < requireSize {
 		b.isFull.Store(true)
-		b.mu.Unlock()
 		return ErrBufferFull
 	}
-	b.mu.Unlock()
 
-	copy(b.data[b.w:requireSize], data)
+	copy(b.data[b.w:b.w+requireSize], data)
 	b.w += requireSize
 
 	return nil

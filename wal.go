@@ -87,6 +87,7 @@ func NewWAL(capacity int64, dir string, blockSize int64, interval time.Duration)
 		closed:   make(chan struct{}),
 		t:        time.NewTicker(interval),
 		switchMu: sync.Mutex{},
+		m:        NewMemoryMonitor(),
 	}
 	w.s.Store(WritingStatus)
 	go w.asyncWorker()

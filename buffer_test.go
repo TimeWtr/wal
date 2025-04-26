@@ -40,11 +40,7 @@ func TestNewBuffer(t *testing.T) {
 
 		for i := 0; i < 100; i++ {
 			msg := []byte(fmt.Sprintf("this is a test message, number: %d\n", i))
-			isFull := false
-			if i%3 == 0 {
-				isFull = true
-			}
-			err = buf.write(msg, isFull)
+			err = buf.write(msg)
 			if err != nil && errors.Is(err, ErrBufferFull) {
 				//t.Log("buffer full, sync run!")
 				buf.asyncRead()
@@ -91,11 +87,7 @@ func BenchmarkBuffer_Read_Write(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			msg := []byte(fmt.Sprintf("this is a test message, number: %d\n", i))
-			isFull := false
-			if i%3 == 0 {
-				isFull = true
-			}
-			err = buf.write(msg, isFull)
+			err = buf.write(msg)
 			if err != nil && errors.Is(err, ErrBufferFull) {
 				buf.asyncRead()
 			}
