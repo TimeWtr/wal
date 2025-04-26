@@ -15,9 +15,11 @@
 package wal
 
 import (
-	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
+	"io/fs"
+	"math/rand"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -68,30 +70,6 @@ func (b BlockDataType) uint16() uint16 {
 	return uint16(b)
 }
 
-const (
-	// BlockDataTypeSize 块中数据的类型占用的空间，2个字节
-	BlockDataTypeSize = 2
-	// LSN (Log Sequence Number)占用的空间，8个字节，可以支持每秒大数据量的写入
-	LSN = 8
-	// DataLengthSize 数据本身的长度占用的空间，8个字节
-	DataLengthSize = 8
-	// Crc32Size crc32校验码占用的空间，4个字节
-	Crc32Size = 4
-	// HeaderSize 头部的长度
-	HeaderSize = BlockDataTypeSize + LSN + DataLengthSize + Crc32Size
-
-	// BlockDataTypeOffset BlockDataTypeSize 的偏移量
-	BlockDataTypeOffset = 0
-	// LSNOffset LSN的偏移量
-	LSNOffset = BlockDataTypeOffset + BlockDataTypeSize
-	// DataLengthOffset 数据长度的偏移量
-	DataLengthOffset = LSNOffset + LSN
-	// Crc32Offset crc32的偏移量
-	Crc32Offset = DataLengthOffset + DataLengthSize
-	// ContentOffset 数据内容的偏移量
-	ContentOffset = Crc32Offset + Crc32Size
-)
-
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
 // Buffer 设计需要偏移量来实现，通过偏移量来判断是否需要切换通道
@@ -102,8 +80,6 @@ type Buffer struct {
 	_ [64]byte
 	// 当前正在写的偏移量
 	w int64
-	// 下次写入的偏移量
-	nextW int64
 	// 填充64字节，隔离w和r
 	_ [64]byte
 	// 当前正在读的偏移量
@@ -143,7 +119,7 @@ func newBuffer(capacity int64, wal *os.File, blockSize int64) *Buffer {
 
 // free 通道剩余的空间，字节数
 func (b *Buffer) free() int64 {
-	return b.capacity - b.nextW
+	return b.capacity - b.w
 }
 
 func (b *Buffer) full() bool {
@@ -155,12 +131,12 @@ func (b *Buffer) reset() {
 	for i := range b.data {
 		b.data[i] = 0
 	}
-	b.w, b.r, b.nextW = 0, 0, 0
+	b.w, b.r = 0, 0
 	b.isFull.Store(false)
 }
 
 // write 写入数据，还需要传入参数标识是否是完整的数据
-func (b *Buffer) write(data []byte, isFull bool) error {
+func (b *Buffer) write(data []byte) error {
 	if b.status.Load() == ReadingBufferStatus {
 		return ErrBufferFull
 	}
@@ -170,38 +146,21 @@ func (b *Buffer) write(data []byte, isFull bool) error {
 	}
 
 	b.mu.Lock()
-	requireSize := int64(HeaderSize + len(data))
+	defer b.mu.Unlock()
+	requireSize := int64(len(data))
 	if b.free() < requireSize {
 		b.isFull.Store(true)
-		b.mu.Unlock()
 		return ErrBufferFull
 	}
 
-	startOffset := b.nextW
-	b.nextW = b.nextW + requireSize
-	b.mu.Unlock()
-
-	if isFull {
-		binary.BigEndian.PutUint16(b.data[startOffset+BlockDataTypeOffset:startOffset+LSNOffset], BlockTypeFull.uint16())
-	} else {
-		binary.BigEndian.PutUint16(b.data[startOffset+BlockDataTypeOffset:startOffset+LSNOffset], BlockTypeHeader.uint16())
-	}
-
-	binary.BigEndian.PutUint64(b.data[startOffset+LSNOffset:startOffset+DataLengthOffset], b.lsn())
-
-	binary.BigEndian.PutUint64(b.data[startOffset+DataLengthOffset:startOffset+Crc32Offset], uint64(len(data)))
-
-	checkSum := crc32.Checksum(data, crcTable)
-	binary.BigEndian.PutUint32(b.data[startOffset+Crc32Offset:startOffset+ContentOffset], checkSum)
-
-	copy(b.data[startOffset+ContentOffset:startOffset+requireSize], data)
+	copy(b.data[b.w:b.w+requireSize], data)
 	b.w += requireSize
 
 	return nil
 }
 
 func (b *Buffer) lsn() uint64 {
-	return 0
+	return uint64(rand.Intn(10000))
 }
 
 // asyncRead 异步读取，因为是双通道会切换通道，所以当该通道转换为异步刷盘通道读取
@@ -212,7 +171,7 @@ func (b *Buffer) asyncRead() {
 	}
 
 	b.switchReading()
-	for b.r <= b.nextW && b.nextW != 0 {
+	for b.r <= b.w && b.w != 0 {
 		select {
 		case <-b.closed:
 			return
@@ -220,8 +179,8 @@ func (b *Buffer) asyncRead() {
 		}
 
 		endOffset := b.r + b.blockSize
-		if endOffset >= b.nextW {
-			endOffset = b.nextW
+		if endOffset >= b.w {
+			endOffset = b.w
 		}
 		data := b.data[b.r:endOffset]
 		if len(data) == 0 {
@@ -236,6 +195,11 @@ func (b *Buffer) asyncRead() {
 		}
 
 		if err = b.wal.Sync(); err != nil {
+			if errors.Is(err, fs.ErrInvalid) {
+				_, _ = os.Stderr.WriteString("failed to persist, cause: " + err.Error())
+				return
+			}
+			_ = b.wal.Sync()
 			//todo 需要处理刷盘失败问题以及重试可能导致的数据写入重复问题
 			fmt.Println("同步失败：", err)
 			continue

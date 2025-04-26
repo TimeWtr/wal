@@ -25,4 +25,4 @@ check:
 
 clean:
 	@rm -f wal.test
-	@rm -rf logs
+	@cd logs && rm -rf *
