@@ -70,6 +70,7 @@ func newMergeSort(sources [][]uint64) *mergeSort {
 func (ms *mergeSort) Run() {
 	for ms.tree.Next() {
 		fmt.Println("at: ", ms.tree.At())
+		//todo 获取到当前最小的LSN，根据LSN获取到完整的数据，写入到WAL文件中
 	}
 }
 

@@ -42,8 +42,8 @@ const (
 )
 
 const (
-	// LSN (Log Sequence Number)占用的空间，8个字节，可以支持每秒大数据量的写入
-	LSN = 8
+	// LSNSize (Log Sequence Number)占用的空间，8个字节，可以支持每秒大数据量的写入
+	LSNSize = 8
 	// BlockDataTypeSize 块中数据的类型占用的空间，2个字节
 	BlockDataTypeSize = 2
 	// DataLengthSize 数据本身的长度占用的空间，8个字节
@@ -51,12 +51,12 @@ const (
 	// Crc32Size crc32校验码占用的空间，4个字节
 	Crc32Size = 4
 	// HeaderSize 头部的长度
-	HeaderSize = BlockDataTypeSize + LSN + DataLengthSize + Crc32Size
+	HeaderSize = BlockDataTypeSize + LSNSize + DataLengthSize + Crc32Size
 
 	// LSNOffset LSN的偏移量
 	LSNOffset = 0
 	// BlockDataTypeOffset BlockDataTypeSize 的偏移量
-	BlockDataTypeOffset = LSNOffset + LSN
+	BlockDataTypeOffset = LSNOffset + LSNSize
 	// DataLengthOffset 数据长度的偏移量
 	DataLengthOffset = BlockDataTypeOffset + BlockDataTypeOffset
 	// Crc32Offset crc32的偏移量

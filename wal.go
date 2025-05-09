@@ -98,7 +98,7 @@ func NewWAL(capacity int64, dir string, blockSize int64, interval time.Duration)
 // Write 写入数据，会出现双通道切换的问题，必须要保证通道的切换不影响当前数据的写入
 // 调用方不关心是否进行通道切换，只关心数据写入问题
 // 流程如下：
-// 1. 给数据添加元数据头信息：LSN、数据类型、数据长度、CRC32校验码
+// 1. 给数据添加元数据头信息：LSNSize、数据类型、数据长度、CRC32校验码
 // 2. 获取当前机器的内存占用比例，判断是否大于阈值，大于则跳过缓冲区，立即写入到暂存文件
 // 3. 如果正常范围内，则尝试写入到缓冲区通道，重试次数为8次
 // 4. 如果出现重试8次后仍然没有写入成功，则立即写入到暂存文件
@@ -187,7 +187,7 @@ func (w *WAL) emergencyFlush(p []byte) error {
 	return err
 }
 
-// attachMetadataHeader 为每一条数据添加元数据信息，包括：LSN、是否完整、数据长度、CRC32校验码
+// attachMetadataHeader 为每一条数据添加元数据信息，包括：LSNSize、是否完整、数据长度、CRC32校验码
 func (w *WAL) attachMetadataHeader(p []byte, isFull bool) []byte {
 	data := make([]byte, len(p)+HeaderSize)
 	binary.BigEndian.PutUint64(data[LSNOffset:BlockDataTypeOffset], w.lsn())
