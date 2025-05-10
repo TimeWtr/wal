@@ -270,3 +270,40 @@ func TestLSNManager_Next_Storage(t *testing.T) {
 		t.Logf("lsn: %d\n", lsn)
 	}
 }
+
+func TestLSNManager_Next_Storage_Load(t *testing.T) {
+	gen := newLsnGenerator(10, 18, 00000001, time.Now())
+	sto, err := newFileStorage("./logs")
+	assert.NoError(t, err)
+	lsm, err := newLSNManager(gen, sto)
+	assert.NoError(t, err)
+	defer lsm.Close()
+
+	for i := 0; i < 1000; i++ {
+		if i%10 == 0 {
+			if err = lsm.Save(); err != nil {
+				t.Logf("failed to save lsn, cause: %s\n", err.Error())
+			}
+		}
+
+		if i%100 == 0 {
+			if err = lsm.Sync(); err != nil {
+				t.Logf("failed to sync lsn, cause: %s\n", err.Error())
+			}
+		}
+
+		lsn, er := lsm.Next()
+		if er != nil {
+			t.Logf("failed to generate lsn, timestamp: %d, cause: %s\n", time.Now().UnixMilli(), er.Error())
+			continue
+		}
+		t.Logf("lsn: %d\n", lsn)
+	}
+
+	//err = lsm.SaveAndSync()
+	//assert.NoError(t, err)
+	//
+	//lsn, err := lsm.Load()
+	//assert.NoError(t, err)
+	//t.Logf("newest lsn: %d\n", lsn)
+}

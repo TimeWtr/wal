@@ -28,8 +28,9 @@ import (
 )
 
 var (
-	lsnOnce    sync.Once
-	lsnManager *LSNManager
+	lsnOnce      sync.Once
+	closeLsnOnce sync.Once
+	lsnManager   *LSNManager
 )
 
 const MaxCounter = 5
@@ -176,6 +177,8 @@ type Storage interface {
 	Save(lsn LSN) error
 	// Load 加载最近的LSN
 	Load() (LSN, error)
+	// SaveAndSync 保存并强制刷盘
+	SaveAndSync(lsn LSN) error
 	// Sync 强制刷盘
 	Sync() error
 	// Close 关闭信号
@@ -209,6 +212,7 @@ func (f *FileStorage) Save(lsn LSN) error {
 	binary.BigEndian.PutUint64(encoded[8:], uint64(time.Now().UnixMilli()))
 
 	_, err := f.f.WriteAt(encoded, 0)
+
 	return err
 }
 
@@ -230,11 +234,19 @@ func (f *FileStorage) Load() (LSN, error) {
 
 	// 校验时间戳
 	storedTime := binary.BigEndian.Uint64(bs[8:])
-	if time.Since(time.Unix(0, int64(storedTime))) > time.Hour {
+	if time.Now().Sub(time.UnixMilli(int64(storedTime))) > time.Hour {
 		return LSN{}, errors.New("stale LSN detected")
 	}
 
 	return decode(binary.BigEndian.Uint64(bs[:8])), nil
+}
+
+func (f *FileStorage) SaveAndSync(lsn LSN) error {
+	if err := f.Save(lsn); err != nil {
+		return err
+	}
+
+	return f.Sync()
 }
 
 func (f *FileStorage) Sync() error {
@@ -294,18 +306,16 @@ func decode(lsn uint64) LSN {
 
 // LSNManager LSN的生成管理器
 type LSNManager struct {
-	g    Generator
-	s    Storage
-	once sync.Once
+	g Generator
+	s Storage
 }
 
 func newLSNManager(g Generator, s Storage) (*LSNManager, error) {
 	var err error
 	lsnOnce.Do(func() {
 		lsnManager = &LSNManager{
-			g:    g,
-			s:    s,
-			once: sync.Once{},
+			g: g,
+			s: s,
 		}
 	})
 
@@ -319,6 +329,10 @@ func (lm *LSNManager) Save() error {
 
 func (lm *LSNManager) Load() (LSN, error) {
 	return lm.s.Load()
+}
+
+func (lm *LSNManager) SaveAndSync() error {
+	return lm.s.SaveAndSync(lm.g.Current())
 }
 
 // Sync 直接同步刷盘，把操作系统PageCache中的缓存数据强制刷盘到持久化文件中
@@ -335,7 +349,7 @@ func (lm *LSNManager) Current() LSN {
 }
 
 func (lm *LSNManager) Close() {
-	lm.once.Do(func() {
+	closeLsnOnce.Do(func() {
 		lm.g.Close()
 		lm.s.Close()
 	})
