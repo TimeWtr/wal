@@ -10,6 +10,11 @@
 LSN: 
     每一条数据都有一个LSN，这个LSN是全局唯一且单调递增的，用于对数据进行排序，保证全局有序。
 
+|Timelin| DataCenter | Instance | Timestamp |Counter|
+|-------|------------|----------|-----------|-------|
+| 6bits | 5bits      | 5bit     | 41bits    | 7bits |
+
+
 分片类型：
     
 - All: 当前数据块包含完整的一条日志数据
