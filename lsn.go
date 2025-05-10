@@ -16,14 +16,12 @@ package wal
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 )
-
-const BaseYear = 2025
 
 var (
 	lsnOnce    sync.Once
@@ -32,38 +30,77 @@ var (
 
 type Generator interface {
 	// Next 获取下一个LSN
-	Next() LSN
+	Next() (LSN, error)
 	// Current 获取当前LSN
 	Current() LSN
-	// Reset 重置LSN时间线
-	Reset(timeline uint32)
 }
 
-// lsnGenrator 基于epoch基准时间线来进行计算高位并生成完整的LSN，
-type lsnGenrator struct {
-	lock sync.Mutex
-	// 时间基准线
-	epoch time.Time
-	// 机器码，10位
+// lsnGenerator 基于epoch基准时间线来进行计算高位并生成完整的LSN，
+type lsnGenerator struct {
+	lock sync.RWMutex
+	// 机器码
 	machineID uint16
+	// 时间线
+	timeline uint8
 	// 上次生成LSN的时间
-	// 计数器，14位
-	counter atomic.Uint32
+	lastTime int64
+	// 计数器
+	counter uint8
+	// 当前的LSN
+	lsn LSN
 }
 
-func (l *lsnGenrator) Next() LSN {
-	//TODO implement me
-	panic("implement me")
+func newLsnGenerator(machineID uint16, timeline uint8) Generator {
+	return &lsnGenerator{
+		lock:      sync.RWMutex{},
+		machineID: machineID,
+		timeline:  timeline,
+	}
 }
 
-func (l *lsnGenrator) Current() LSN {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (l *lsnGenrator) Reset(timeline uint8) {
+func (l *lsnGenerator) Next() (LSN, error) {
 	l.lock.Lock()
 	defer l.lock.Unlock()
+
+	now := time.Now().UnixMilli()
+	if now < l.lastTime {
+		// 出现了时钟回拨问题
+		delta := l.lastTime - now
+		if delta < 5_000 {
+			time.Sleep(time.Duration(delta) * time.Millisecond)
+			now = time.Now().UnixMilli()
+		} else {
+			return l.lsn, fmt.Errorf("critical clock rollback %dms", delta)
+		}
+	}
+
+	// 同一时间窗口内超过了最大数量限制
+	if now == l.lastTime && l.counter >= 0x7F {
+		return l.lsn, fmt.Errorf("lsn generator counter too big")
+	}
+
+	// 新的时间窗口
+	if now > l.lastTime {
+		l.lastTime = now
+		l.counter = 0
+	}
+
+	l.counter++
+	l.lsn = LSN{
+		Timeline:  l.timeline,
+		MachineID: l.machineID,
+		Timestamp: now,
+		couter:    l.counter,
+	}
+
+	return l.lsn, nil
+}
+
+func (l *lsnGenerator) Current() LSN {
+	l.lock.RLock()
+	defer l.lock.RUnlock()
+
+	return l.lsn
 }
 
 type Storage interface {
@@ -77,38 +114,38 @@ type Storage interface {
 
 // LSN 数据结构设计
 // +---------+-----------+---------------------+-----------+
-// | 8 bits  | 10 bits   | 41 bits             | 12 bits   |
+// | 6 bits  | 10 bits   | 41 bits             | 7 bits   |
 // | Timeline| MachineID | Timestamp           | Counter   |
 // +---------+-----------+---------------------+-----------+
 // 这样的设计：
 //
-//		单节点：每秒可以生成16383个LSN，每天可以生成14.15亿
-//		集群(1024)：每秒可以生成1,677万个LSN，每天可以生成1.45万亿
-//	    理论上可以支撑136年
+//		单节点：每秒可以生成128000个LSN，每天可以生成110.6亿
+//		集群(1024)：每秒可以生个131,072,000个LSN，每天可以生成11,324亿
+//	    理论上可以支撑69年
 type LSN struct {
-	// 时间线
+	// 时间线，6位
 	Timeline uint8
 	// 机器ID，10位
 	MachineID uint16
-	// 时间戳，秒级，32位
-	Timestamp int32
-	// 计数器，14位
-	couter uint16
+	// 时间戳，毫秒级，41位
+	Timestamp int64
+	// 计数器，7位
+	couter uint8
 }
 
 func encode(l LSN) uint64 {
-	return (uint64(l.Timeline) << 56) |
-		uint64(l.MachineID)<<46 |
-		uint64(l.Timestamp)<<14 |
-		uint64(l.couter)
+	return (uint64(l.Timeline&0x3F) << 58) |
+		uint64(l.MachineID&0x3FF)<<48 |
+		uint64(l.Timestamp&0xFFFFFFFFFF)<<7 |
+		uint64(l.couter&0x7F)
 }
 
 func decode(lsn uint64) LSN {
 	return LSN{
-		Timeline:  uint8(lsn >> 56),
-		MachineID: uint16(lsn >> 46 & 0x3FF),
-		Timestamp: int32(lsn >> 14 & 0xFFFFFFFF),
-		couter:    uint16(lsn >> 14 & 0x3FF),
+		Timeline:  uint8(lsn >> 58 & 0x3F),
+		MachineID: uint16(lsn >> 48 & 0x3FF),
+		Timestamp: int64(lsn >> 7 & 0xFFFFFFFFFF),
+		couter:    uint8(lsn & 0x7F),
 	}
 }
 
@@ -173,7 +210,7 @@ func (lm *LSNManager) Sync() error {
 	return lm.f.Sync()
 }
 
-func (lm *LSNManager) Next() LSN {
+func (lm *LSNManager) Next() (LSN, error) {
 	lm.lock.Lock()
 	defer lm.lock.Unlock()
 
@@ -185,13 +222,6 @@ func (lm *LSNManager) Current() LSN {
 	defer lm.lock.RUnlock()
 
 	return lm.g.Current()
-}
-
-func (lm *LSNManager) Reset(timeline uint32) {
-	lm.lock.Lock()
-	defer lm.lock.Unlock()
-
-	lm.g.Reset(timeline)
 }
 
 func (lm *LSNManager) close() {
