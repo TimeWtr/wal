@@ -15,11 +15,15 @@
 package wal
 
 import (
-	"encoding/json"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,20 +32,20 @@ var (
 	lsnManager *LSNManager
 )
 
+const MaxCounter = 5
+
 type Generator interface {
 	// Next 获取下一个LSN
 	Next() (LSN, error)
 	// Current 获取当前LSN
 	Current() LSN
+	// ResetEpoch 重置时间基线
+	ResetEpoch(epoch time.Time)
+	// Close 关闭
+	Close()
 }
 
-// lsnGenerator 基于epoch基准时间线来进行计算高位并生成完整的LSN，
-type lsnGenerator struct {
-	lock sync.RWMutex
-	// 机器码
-	machineID uint16
-	// 时间线
-	timeline uint8
+type lsnState struct {
 	// 上次生成LSN的时间
 	lastTime int64
 	// 计数器
@@ -50,57 +54,121 @@ type lsnGenerator struct {
 	lsn LSN
 }
 
-func newLsnGenerator(machineID uint16, timeline uint8) Generator {
-	return &lsnGenerator{
-		lock:      sync.RWMutex{},
+// lsnGenerator 基于epoch基准时间线来进行计算高位并生成完整的LSN，
+type lsnGenerator struct {
+	// 数据中心
+	centerID uint8
+	// 机器码
+	machineID uint8
+	// 时间线
+	timeline uint8
+	// 时间基线
+	epoch atomic.Int64
+	// 状态
+	state atomic.Value
+	// 缓存时间戳，防止高并发场景下频繁调用内核获取时间造成的时间占用和CPU占用
+	now atomic.Int64
+	// 关闭信号
+	sig chan struct{}
+}
+
+// TODO 添加指标采集
+func newLsnGenerator(centerID, machineID, timeline uint8, epoch time.Time) Generator {
+	gen := &lsnGenerator{
+		centerID:  centerID,
 		machineID: machineID,
 		timeline:  timeline,
+		sig:       make(chan struct{}),
 	}
+
+	gen.epoch.Store(epoch.UnixMilli())
+	state := &lsnState{}
+	gen.state.Store(state)
+
+	// 性能优化，防止频繁的获取当前时间窗口
+	go func() {
+		ticker := time.NewTicker(time.Millisecond)
+		for {
+			select {
+			case <-gen.sig:
+				return
+			case <-ticker.C:
+				gen.now.Store(time.Now().UnixMilli() - gen.epoch.Load())
+			}
+		}
+	}()
+
+	return gen
 }
 
 func (l *lsnGenerator) Next() (LSN, error) {
-	l.lock.Lock()
-	defer l.lock.Unlock()
+	counter := uint8(0)
+	for {
+		select {
+		case <-l.sig:
+			return LSN{}, errors.New("lsn generator closed")
+		default:
+		}
 
-	now := time.Now().UnixMilli()
-	if now < l.lastTime {
-		// 出现了时钟回拨问题
-		delta := l.lastTime - now
-		if delta < 5_000 {
-			time.Sleep(time.Duration(delta) * time.Millisecond)
-			now = time.Now().UnixMilli()
+		counter++
+		oldState := l.state.Load().(*lsnState)
+		now := l.now.Load()
+
+		// 时钟回拨问题
+		if now < oldState.lastTime {
+			if delta := oldState.lastTime - now; delta < 5_000 {
+				runtime.Gosched()
+				continue
+			} else {
+				return oldState.lsn, fmt.Errorf("critical clock rollback %dms", delta)
+			}
+		}
+
+		// 处理计时器溢出的问题
+		var newCounter uint8
+		if now == oldState.lastTime {
+			if oldState.counter >= 0x7F {
+				return oldState.lsn, fmt.Errorf("counter overflow")
+			}
+
+			newCounter = oldState.counter + 1
 		} else {
-			return l.lsn, fmt.Errorf("critical clock rollback %dms", delta)
+			newCounter = 0
+		}
+
+		// 构建新的LSN
+		newState := &lsnState{
+			lastTime: now,
+			counter:  newCounter,
+			lsn: LSN{
+				Timeline:  l.timeline,
+				CenterID:  l.centerID,
+				MachineID: l.machineID,
+				Timestamp: now,
+				counter:   newCounter,
+			},
+		}
+
+		if l.state.CompareAndSwap(oldState, newState) {
+			return newState.lsn, nil
+		}
+
+		if counter > MaxCounter {
+			runtime.Gosched()
 		}
 	}
-
-	// 同一时间窗口内超过了最大数量限制
-	if now == l.lastTime && l.counter >= 0x7F {
-		return l.lsn, fmt.Errorf("lsn generator counter too big")
-	}
-
-	// 新的时间窗口
-	if now > l.lastTime {
-		l.lastTime = now
-		l.counter = 0
-	}
-
-	l.counter++
-	l.lsn = LSN{
-		Timeline:  l.timeline,
-		MachineID: l.machineID,
-		Timestamp: now,
-		couter:    l.counter,
-	}
-
-	return l.lsn, nil
 }
 
 func (l *lsnGenerator) Current() LSN {
-	l.lock.RLock()
-	defer l.lock.RUnlock()
+	return l.state.Load().(*lsnState).lsn
+}
 
-	return l.lsn
+func (l *lsnGenerator) ResetEpoch(epoch time.Time) {
+	l.epoch.Store(epoch.UnixMilli())
+}
+
+func (l *lsnGenerator) Close() {
+	close(l.sig)
 }
 
 type Storage interface {
@@ -110,64 +178,134 @@ type Storage interface {
 	Load() (LSN, error)
 	// Sync 强制刷盘
 	Sync() error
+	// Close 关闭信号
+	Close()
+}
+
+// FileStorage 本地文件存储当前的LSN进度，即最新的LSN和毫秒时间戳
+type FileStorage struct {
+	f    *os.File
+	lock sync.Mutex
+}
+
+func newFileStorage(dir string) (Storage, error) {
+	f, err := os.OpenFile(filepath.Join(dir, "wal.lsn"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+
+	return &FileStorage{
+		f:    f,
+		lock: sync.Mutex{},
+	}, nil
+}
+
+func (f *FileStorage) Save(lsn LSN) error {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+
+	encoded := make([]byte, 16)
+	binary.BigEndian.PutUint64(encoded[:8], encode(lsn))
+	binary.BigEndian.PutUint64(encoded[8:], uint64(time.Now().UnixMilli()))
+
+	_, err := f.f.WriteAt(encoded, 0)
+	return err
+}
+
+func (f *FileStorage) Load() (LSN, error) {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+
+	var lsn LSN
+	bs := make([]byte, 16)
+	_, err := f.f.ReadAt(bs, 0)
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			// 初始化状态
+			return lsn, nil
+		}
+
+		return lsn, fmt.Errorf("read LSN failed: %v", err)
+	}
+
+	// 校验时间戳
+	storedTime := binary.BigEndian.Uint64(bs[8:])
+	if time.Since(time.Unix(0, int64(storedTime))) > time.Hour {
+		return LSN{}, errors.New("stale LSN detected")
+	}
+
+	return decode(binary.BigEndian.Uint64(bs[:8])), nil
+}
+
+func (f *FileStorage) Sync() error {
+	return f.f.Sync()
+}
+
+func (f *FileStorage) Close() {
+	_ = f.f.Close()
 }
 
 // LSN 数据结构设计
-// +---------+-----------+---------------------+-----------+
-// | 6 bits  | 10 bits   | 41 bits             | 7 bits   |
-// | Timeline| MachineID | Timestamp           | Counter   |
-// +---------+-----------+---------------------+-----------+
+// +---------+------------+----------+---------------------+-----------+
+// | 6 bits  ｜5 bits     | 5 bits   | 41 bits             | 7 bits   |
+// | Timeline| DataCenter | Instance | Timestamp           | Counter   |
+// +---------+------------+----------+---------------------+-----------+
 // 这样的设计：
 //
-//		单节点：每秒可以生成128000个LSN，每天可以生成110.6亿
-//		集群(1024)：每秒可以生个131,072,000个LSN，每天可以生成11,324亿
-//	    理论上可以支撑69年
+//	单实例生成能力
+//		每秒容量：128（计数器容量） × 1,000 ms = 128,000 LSN/秒
+//		每日容量：128,000 × 86,400秒 = 11,059,200,000 LSN ≈ 110.6亿/天
+//	单机房生成能力（32实例）
+//		每秒容量：128,000 × 32 = 4,096,000 LSN/秒
+//		每日容量：4,096,000 × 86,400 ≈ 353.9亿/天
+//	集群生成能力（32机房 × 32实例）
+//		每秒容量：128,000 × 32 × 32 = 131,072,000 LSN/秒
+//		每日容量：131,072,000 × 86,400 ≈ 11,324亿/天
 type LSN struct {
 	// 时间线，6位
 	Timeline uint8
-	// 机器ID，10位
-	MachineID uint16
+	// 数据中心，5位
+	CenterID uint8
+	// 机器ID，5位
+	MachineID uint8
 	// 时间戳，毫秒级，41位
 	Timestamp int64
 	// 计数器，7位
-	couter uint8
+	counter uint8
 }
 
 func encode(l LSN) uint64 {
 	return (uint64(l.Timeline&0x3F) << 58) |
-		uint64(l.MachineID&0x3FF)<<48 |
+		uint64(l.CenterID&0x1F)<<53 |
+		uint64(l.MachineID&0x1F)<<48 |
 		uint64(l.Timestamp&0xFFFFFFFFFF)<<7 |
-		uint64(l.couter&0x7F)
+		uint64(l.counter&0x7F)
 }
 
 func decode(lsn uint64) LSN {
 	return LSN{
 		Timeline:  uint8(lsn >> 58 & 0x3F),
-		MachineID: uint16(lsn >> 48 & 0x3FF),
+		CenterID:  uint8(lsn >> 53 & 0x1F),
+		MachineID: uint8(lsn >> 48 & 0x1F),
 		Timestamp: int64(lsn >> 7 & 0xFFFFFFFFFF),
-		couter:    uint8(lsn & 0x7F),
+		counter:   uint8(lsn & 0x7F),
 	}
 }
 
 // LSNManager LSN的生成管理器
 type LSNManager struct {
-	f    *os.File
 	g    Generator
 	s    Storage
-	lock sync.RWMutex
+	once sync.Once
 }
 
-func newLSNManager(dir string, g Generator, s Storage) (*LSNManager, error) {
+func newLSNManager(g Generator, s Storage) (*LSNManager, error) {
 	var err error
 	lsnOnce.Do(func() {
 		lsnManager = &LSNManager{
 			g:    g,
 			s:    s,
-			lock: sync.RWMutex{},
-		}
-
-		if lsnManager.f == nil {
-			lsnManager.f, err = os.OpenFile(filepath.Join(dir, "wal.lsn"), os.O_CREATE|os.O_RDWR, 0600)
+			once: sync.Once{},
 		}
 	})
 
@@ -175,55 +313,30 @@ func newLSNManager(dir string, g Generator, s Storage) (*LSNManager, error) {
 }
 
 // Save 保存LSN数据到PageCache中，还未直接写入磁盘文件
-func (lm *LSNManager) Save(lsn LSN) error {
-	lm.lock.Lock()
-	defer lm.lock.Unlock()
-
-	bs, err := json.Marshal(lsn)
-	if err != nil {
-		return err
-	}
-
-	_, err = lm.f.WriteAt(bs, 0)
-	return err
+func (lm *LSNManager) Save() error {
+	return lm.s.Save(lm.g.Current())
 }
 
 func (lm *LSNManager) Load() (LSN, error) {
-	lm.lock.Lock()
-	defer lm.lock.Unlock()
-
-	var lsn LSN
-	var bs []byte
-	_, err := lm.f.ReadAt(bs, 0)
-	if err != nil {
-		return lsn, err
-	}
-
-	return lsn, json.Unmarshal(bs, &lsn)
+	return lm.s.Load()
 }
 
 // Sync 直接同步刷盘，把操作系统PageCache中的缓存数据强制刷盘到持久化文件中
 func (lm *LSNManager) Sync() error {
-	lm.lock.Lock()
-	defer lm.lock.Unlock()
-
-	return lm.f.Sync()
+	return lm.s.Sync()
 }
 
 func (lm *LSNManager) Next() (LSN, error) {
-	lm.lock.Lock()
-	defer lm.lock.Unlock()
-
 	return lm.g.Next()
 }
 
 func (lm *LSNManager) Current() LSN {
-	lm.lock.RLock()
-	defer lm.lock.RUnlock()
-
 	return lm.g.Current()
 }
 
-func (lm *LSNManager) close() {
-	_ = lm.f.Close()
+func (lm *LSNManager) Close() {
+	lm.once.Do(func() {
+		lm.g.Close()
+		lm.s.Close()
+	})
 }
