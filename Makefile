@@ -11,7 +11,7 @@ vet:
 
 .PHONY: ut
 ut:
-	@go test ./...
+	@go test -race ./...
 
 .PHONY: tidy
 tidy:

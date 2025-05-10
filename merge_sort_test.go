@@ -38,13 +38,13 @@ func TestNewMergeSort(t *testing.T) {
 func TestNewMergeSort_Random(t *testing.T) {
 	sources := make([][]uint64, 12)
 	for i := 0; i < 10; i++ {
-		item := make([]int, 200000)
+		item := make([]int, 2000)
 		for j := range item {
 			item[j] = rand.Intn(1000)
 		}
 		sort.Ints(item)
 
-		sourceItem := make([]uint64, 200000)
+		sourceItem := make([]uint64, 2000)
 		for j, val := range item {
 			sourceItem[j] = uint64(val)
 		}
@@ -60,13 +60,13 @@ func TestNewMergeSort_Random(t *testing.T) {
 func BenchmarkMergeSort_Run(b *testing.B) {
 	sources := make([][]uint64, 12)
 	for i := 0; i < 10; i++ {
-		item := make([]int, 10000)
+		item := make([]int, 1000)
 		for j := range item {
 			item[j] = rand.Intn(1000)
 		}
 		sort.Ints(item)
 
-		sourceItem := make([]uint64, 10000)
+		sourceItem := make([]uint64, 1000)
 		for j, val := range item {
 			sourceItem[j] = uint64(val)
 		}
